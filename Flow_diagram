@@ -1,0 +1,77 @@
+- **Thu thập dữ liệu (Data Acquisition):**
+  - Máy tính kết nối với **IP Camera** qua giao thức **RTSP** hoặc đọc trực tiếp từ **Webcam** bằng thư viện OpenCV.
+- **Xử lý sơ bộ & Phát hiện (Detection):**
+  - Sử dụng **MediaPipe Face Detection** để xác định vị trí khuôn mặt trong khung hình. Thư viện này nhẹ, chạy nhanh trên CPU máy tính cá nhân (có thể dùng model Face Detection của OpenVINO để tận dụng tập lệnh tăng tốc của Intel.)
+  - Đừng đọc từng frame một cách tuần tự nếu không muốn máy tính bị treo.
+  - **Multi-threading**: Tách luồng đọc Camera và luồng xử lý AI. Luồng đọc ảnh luôn giữ frame mới nhất trong bộ nhớ đệm (Queue), luồng AI lấy ảnh từ đó ra để phân tích.
+  - **Frame Skipping**: Không cần xử lý toàn bộ 30fps. Chỉ cần lấy 5-10 khung hình/giây là đủ để phát hiện người lạ mà vẫn tiết kiệm CPU.
+- **Tiền xử lý (Preprocessing):**
+  - **Cắt (Crop):** Tách vùng chứa khuôn mặt dựa trên tọa độ từ bước 2.
+  - **Alignment** (Căn chỉnh): **Phát hiện mốc** (**Landmarks**): Dùng MediaPipe lấy 5 điểm mốc (2 mắt, mũi, 2 khóe miệng).
+  - **Xoay ảnh (Affine Transform**): Xoay ảnh sao cho đường nối hai mắt nằm ngang. Việc này giúp vector trích xuất đồng nhất dù người đó đang nghiêng đầu.
+  - **Chuẩn hóa (Normalize):** Thay đổi kích thước (ví dụ 160x160) và cân bằng ánh sáng để đảm bảo độ chính xác cho mô hình nhận diện.
+- **Trích xuất đặc trưng (Feature Extraction):**
+  - Đưa ảnh đã chuẩn hóa qua model (như **FaceNet** hoặc **InsightFace**) để chuyển đổi hình ảnh thành một **Vector 128 chiều** (hoặc 512 chiều) duy nhất.
+  - Ưu tiên dùng **model MobileFaceNet** hoặc **Tiny-YOLOv8-face**. Chúng cực nhẹ và được tối ưu cho CPU.
+  - Convert model **MobileFaceNet** (từ **định dạng .onnx hoặc .pb**) sang định dạng **IR (Intermediate Representation)** của **OpenVINO** (.xml và .bin).
+- **So khớp & Lưu trữ (Matching & DB):**
+  - **Database:** Lưu danh sách các vector đại diện cho người nhà.
+  - **So sánh:** Tính toán khoảng cách (ví dụ: **Euclidean distance** hoặc **Cosine Similarity**) giữa vector vừa trích xuất với các vector trong DB.
+
+\* Khi số lượng ảnh trong nhà tăng lên (ví dụ mỗi người 10 ảnh mẫu), việc so khớp thủ công sẽ chậm.
+
+- - **Indexing**: Sử dụng **Faiss (Facebook AI Similarity Search)** để tìm kiếm vector hàng xóm gần nhất (Nearest Neighbor) cực nhanh.
+    - Đăng ký (**Enrollment**): Viết một script riêng để quét thư mục ảnh gia đình -> Trích xuất Vector -> Lưu vào file &lt;vectors.db&gt;. Mỗi người nên có ít nhất 5-10 góc mặt khác nhau để tăng độ nhạy.
+
+- **Logic Cảnh báo (Alerting):**
+  - Nếu khoảng cách > ngưỡng (Threshold): Xác định là **Người lạ** -> Kích hoạt cảnh báo (gửi thông báo, lưu ảnh vi phạm).
+  - Nếu khoảng cách < ngưỡng: Xác định là **Người nhà** -> Không báo động.
+  - Quy tắc 3/5: Chỉ phát lệnh "Người lạ" nếu trong 5 khung hình liên tiếp, có ít nhất 3 khung hình hệ thống không nhận diện được đó là ai.
+  - Ngưỡng (Threshold):
+    - Khoảng cách Euclidean < 0.6: Người quen.
+    - Khoảng cách 0.6 - 0.8: Không chắc chắn (Cần kiểm tra thêm).
+    - Khoảng cách > 0.8: Chắc chắn người lạ.
+
+- **Ngôn ngữ:** Python (Phù hợp nhất cho xử lý AI/Ảnh).
+- **Thư viện chính:** opencv-python, mediapipe, numpy, scipy (để tính khoảng cách vector).
+- **Database:** Đơn giản thì dùng file .pkl (Pickle) hoặc **SQLite**
+- **Sơ đồ triển khai chi tiết (Physical Architecture)**
+
+| **Thành phần** | **Công nghệ** |
+| --- | --- |
+| **Backend Core** | Python FastAPI (Để quản lý luồng dữ liệu) |
+| **Face Engine** | DeepFace (Bọc sẵn MediaPipe, FaceNet, VGG-Face) |
+| **Messaging** | Telegram Bot API (Gửi thông báo + Ảnh người lạ về điện thoại ngay lập tức) |
+| **Storage** | SQLite (Lưu log: ID, Thời gian, Tên hoặc 'Stranger') |
+
+\--
+
+graph TD
+
+A\[Camera/Webcam\] -- Stream RTSP/USB --> B(OpenCV: Read Frame)
+
+B --> C{MediaPipe: Face Detected?}
+
+C -- No --> B
+
+C -- Yes --> D\[Crop & Normalize Face\]
+
+D --> E\[Face Recognition Model: InsightFace/FaceNet\]
+
+E -- Vector --> F{Comparison Logic}
+
+subgraph Database Area
+
+G\[(Face Vectors DB - Người Nhà)\]
+
+end
+
+G &lt;--&gt; F
+
+F -- Distance &lt; Threshold --&gt; H\[Thành viên gia đình\]
+
+F -- Distance > Threshold --> I\[CẢNH BÁO NGƯỜI LẠ\]
+
+I --> J\[Gửi thông báo / Lưu ảnh vào Folder 'Stranger'\]
+
+H --> K\[Ghi log lịch sử\]
